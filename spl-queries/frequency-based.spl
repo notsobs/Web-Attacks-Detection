@@ -1,0 +1,7 @@
+# Catches rapid repeated requests regardless of payload content -
+# gets around the POST-body blind spot conceptually, since it detects
+# on behavior/volume rather than needing to see the actual payload
+index=webattack_lab
+| bucket _time span=1m
+| stats count by clientip, uri, _time
+| where count > 10

@@ -1,0 +1,4 @@
+index=webattack_lab
+| eval decoded_uri=urldecode(replace(uri_query, "\+", " "))
+| regex decoded_uri="(?i)(<script|onerror\s*=|onload\s*=|javascript:)"
+| table _time, clientip, decoded_uri, status

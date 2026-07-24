@@ -1,0 +1,4 @@
+index=webattack_lab
+| eval decoded_uri=urldecode(replace(uri_query, "\+", " "))
+| regex decoded_uri="(?i)(union.*select|or\s+1=1|'\s+or\s+'|--\s|;--)"
+| table _time, clientip, decoded_uri, status

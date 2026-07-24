@@ -1,0 +1,10 @@
+index=webattack_lab
+| eval decoded_uri=urldecode(replace(uri_query, "\+", " "))
+| eval attack_type=case(
+    match(decoded_uri, "(?i)(union.*select|or\s+1=1|'\s+or\s+')"), "SQL Injection",
+    match(decoded_uri, "(?i)(<script|onerror\s*=|onload\s*=)"), "XSS",
+    match(decoded_uri, "(\.\./|etc/passwd)"), "Path Traversal",
+    true(), "Normal"
+)
+| where attack_type!="Normal"
+| stats count by attack_type, clientip
