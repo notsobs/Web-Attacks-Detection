@@ -1,76 +1,59 @@
-# Web Attack Detection with Splunk (DVWA)
+# Web Attack Detection with Splunk
 
-Attacks DVWA (SQLi, XSS, Command Injection, LFI) from Kali, ingests Apache's access log into Splunk, and detects the attacks with SPL.
+A DVWA lab for tracing web attack inputs into Apache access logs and writing SPL searches around the evidence that is actually available.
 
-## Setup
-- **Attacker**: Kali Linux
-- **Target**: Ubuntu Server 24.04 — LAMP stack (Apache, MariaDB, PHP) + DVWA
-- **SIEM**: Splunk, index `webattack_lab`
-- **Network**: isolated VirtualBox host-only
+I tested SQL injection, reflected XSS, command injection, and local file inclusion from Kali. The main lesson was a visibility gap: the access log could show the command-injection request, but not its POST-body payload.
 
-Ingest `/var/log/apache2/access.log` into Splunk.
+## Lab setup
 
-## Attacks run (from Kali)
+- **Attacker:** Kali Linux.
+- **Target:** Ubuntu Server 24.04, Apache, MariaDB, PHP, and DVWA.
+- **Detection:** Apache access logs in Splunk, index `webattack_lab`.
+- **Network:** isolated VirtualBox host-only lab.
 
-**SQLi** — `/dvwa/vulnerabilities/sqli/`
-```
-1' OR '1'='1
-1' AND '1'='2
-1' UNION SELECT null, version()-- -
-1' UNION SELECT user(), database()-- -
-```
+The input is `/var/log/apache2/access.log`. Searches assume Splunk extracts `uri_query`, `uri`, `clientip`, and `status`; check those fields before relying on the queries.
 
-**XSS** — `/dvwa/vulnerabilities/xss_r/`
-```
-<script>alert('xss')</script>
-<img src=x onerror=alert(1)>
-```
+## Inputs tested
 
-**Command Injection** — `/dvwa/vulnerabilities/exec/`
-```
-127.0.0.1; whoami
-127.0.0.1 && id
-```
+These payloads belong to the local DVWA experiment:
 
-**LFI** — `/dvwa/vulnerabilities/fi/`
-```
-?page=../../../../etc/passwd
-```
+| Test | DVWA page | Example input |
+| --- | --- | --- |
+| SQL injection | `/dvwa/vulnerabilities/sqli/` | `1' UNION SELECT null, version()-- -` |
+| Reflected XSS | `/dvwa/vulnerabilities/xss_r/` | `<script>alert(1)</script>` |
+| Command injection | `/dvwa/vulnerabilities/exec/` | `127.0.0.1; whoami` |
+| Local file inclusion | `/dvwa/vulnerabilities/fi/` | `?page=../../../../etc/passwd` |
 
-## Detection (SPL)
+## Detection logic
 
-All queries decode the URL first, since payloads are URL-encoded in the log (`%27`, `+`):
+URL encoding changes what the payload looks like in a log. The searches normalize plus signs and decode the query before matching patterns:
 
 ```spl
 index=webattack_lab
 | eval decoded_uri=urldecode(replace(uri_query, "\+", " "))
-| eval attack_type=case(
-    match(decoded_uri, "(?i)(union.*select|or\s+1=1|'\s+or\s+')"), "SQL Injection",
-    match(decoded_uri, "(?i)(<script|onerror\s*=|onload\s*=)"), "XSS",
-    match(decoded_uri, "(\.\./|etc/passwd)"), "Path Traversal",
-    true(), "Normal"
-)
-| where attack_type!="Normal"
-| stats count by attack_type, clientip
 ```
 
-Individual queries per attack type, plus a frequency-based one that catches rapid requests to any endpoint regardless of payload content: [`spl-queries/`](spl-queries/)
+| Query | What it looks for |
+| --- | --- |
+| [SQL injection](spl-queries/sql-injection.spl) | Selected SQL keywords, Boolean patterns, and comment markers. |
+| [XSS](spl-queries/xss.spl) | Script tags, event handlers, and JavaScript URI patterns. |
+| [Path traversal](spl-queries/path-traversal.spl) | Traversal sequences and selected target-file names. |
+| [Classification](spl-queries/attack-classification.spl) | Labels matching requests and counts them by source. |
+| [Request frequency](spl-queries/frequency-based.spl) | More than ten requests per source and URI in a one-minute bucket. |
 
-## Known limitation: Command Injection isn't detected
+These are pattern searches, not proof of exploitation. Classification chooses the first matching category, and the frequency query identifies volume rather than a specific attack.
 
-DVWA's exec page submits via POST. Apache's access log only records the request line, never the body — so the payload never appears anywhere in the log. Confirmed directly: every command injection request shows as `POST /dvwa/vulnerabilities/exec/` with no query string at all. genuine fix: a WAF (ModSecurity) or full request-body logging (`mod_dumpio`) — noted as a gap rather than solved here.
+## The command-injection blind spot
 
-## Security fixes, ranked
+DVWA’s exec page sends the command input in a POST body. The access log used in this lab records the request line, not that body. The original experiment showed requests to the exec endpoint without the injected command in `uri_query`.
 
-1. Parameterized queries / prepared statements
-2. Input validation + output encoding
-3. A WAF (ModSecurity, Cloudflare)
-4. Least-privilege DB accounts
-5. Full request logging, not just access logs
-6. Keep frameworks/plugins patched 
+That means the existing SPL cannot inspect the missing payload. A volume alert might flag repeated requests, but it does not establish command injection. Application/WAF audit events or carefully scoped request-body telemetry would be needed for deeper inspection. Any additional body logging also needs redaction and retention controls because requests can contain credentials or personal data.
 
-## What's next
-- Actually fix the command-injection blind spot (WAF or `mod_dumpio`)
-- Re-test payloads against DVWA medium/high security levels
-- Brute-force/SQLi-bypass DVWA's login page, detect via request frequency
-- Splunk vs. ELK comparison writeup across all three projects
+## Limits and next steps
+
+- The regexes cover selected examples, not all SQLi/XSS/traversal syntax or encoding variants.
+- Benign inputs can match. Tune against normal traffic before promoting a search to an alert.
+- Access-log fields depend on the Apache format and Splunk extraction.
+- The repository contains queries and a writeup; it does not include raw captures proving each test.
+
+Next I would add sanitized request samples, close the POST-body visibility gap, and compare detections across DVWA security levels. Prevention is separate work: prepared SQL statements, context-aware output encoding, safe file-path handling, and avoiding shell execution for user-controlled input.
